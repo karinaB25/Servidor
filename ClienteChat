@@ -1,0 +1,192 @@
+// Archivo: ClienteChat.java
+import javax.swing.*;
+import java.awt.*;
+import java.awt.event.ActionEvent;
+import java.awt.event.ActionListener;
+import java.io.*;
+import java.net.Socket;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+public class ClienteChat extends JFrame {
+    private JTextArea areaChat;
+    private JTextField campoMensaje;
+    private final JButton botonEnviar;
+    private final JButton botonConectar;
+    private JTextField campoDireccion;
+    private JTextField campoPuerto;
+    private final JTextArea areaLog; // Para mostrar bytes en Hex
+    
+    private Socket clientSocket;
+    private PrintWriter out;
+    private BufferedReader in;
+    private AtomicBoolean conectado = new AtomicBoolean(false);
+
+    public ClienteChat() {
+        super("Cliente de Chat");
+        
+        // --- Configuración de la Interfaz Gráfica ---
+        areaChat = new JTextArea(15, 30);
+        areaChat.setEditable(false);
+        JScrollPane scrollChat = new JScrollPane(areaChat);
+        
+        areaLog = new JTextArea(5, 30);
+        areaLog.setEditable(false);
+        JScrollPane scrollLog = new JScrollPane(areaLog);
+        
+        campoMensaje = new JTextField(20);
+        botonEnviar = new JButton("Enviar");
+        botonEnviar.setEnabled(false);
+        
+        campoDireccion = new JTextField("localhost", 10);
+        campoPuerto = new JTextField("12345", 5);
+        botonConectar = new JButton("Conectar");
+        
+        // Panel de Conexión (Dirección, Puerto, Conectar/Desconectar)
+        JPanel panelConexion = new JPanel(new FlowLayout());
+        panelConexion.add(new JLabel("Dirección:"));
+        panelConexion.add(campoDireccion);
+        panelConexion.add(new JLabel("Puerto:"));
+        panelConexion.add(campoPuerto);
+        panelConexion.add(botonConectar);
+        
+        // Panel de Mensaje (Campo de texto, Botón Enviar)
+        JPanel panelMensaje = new JPanel(new BorderLayout());
+        panelMensaje.add(campoMensaje, BorderLayout.CENTER);
+        panelMensaje.add(botonEnviar, BorderLayout.EAST);
+        
+        // Contenedor principal
+        Container content = getContentPane();
+        content.setLayout(new BorderLayout(5, 5));
+        
+        content.add(panelConexion, BorderLayout.NORTH);
+        content.add(scrollChat, BorderLayout.CENTER);
+        content.add(panelMensaje, BorderLayout.SOUTH);
+        content.add(new JLabel("Bytes Recibidos (Hex):"), BorderLayout.WEST);
+        content.add(scrollLog, BorderLayout.EAST);
+
+        // --- Manejadores de Eventos ---
+        
+        // 1. Conectar/Desconectar
+        botonConectar.addActionListener(e -> {
+            if (!conectado.get()) {
+                conectarAlServidor(campoDireccion.getText(), campoPuerto.getText());
+            } else {
+                detenerConexion();
+            }
+        });
+        
+        // 2. Enviar Mensaje
+        ActionListener enviarListener = e -> {
+            if (conectado.get() && !campoMensaje.getText().isEmpty()) {
+                String mensaje = campoMensaje.getText();
+                try {
+                    out.println(mensaje);
+                    areaChat.append("Yo: " + mensaje + "\n");
+                    campoMensaje.setText("");
+                } catch (Exception ex) {
+                    areaChat.append("Error al enviar: " + ex.getMessage() + "\n");
+                    detenerConexion();
+                }
+            }
+        };
+        
+        botonEnviar.addActionListener(enviarListener);
+        campoMensaje.addActionListener(enviarListener); // Permite enviar con Enter
+        
+        // Configuración final de la ventana
+        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        pack();
+        setVisible(true);
+    }
+    
+    /**
+     * Intenta establecer conexión con el servidor especificado.
+     */
+    private void conectarAlServidor(String direccion, String puertoStr) {
+        int puerto;
+        try {
+            puerto = Integer.parseInt(puertoStr);
+        } catch (NumberFormatException e) {
+            areaChat.append("Error: Puerto inválido.\n");
+            return;
+        }
+        
+        try {
+            areaChat.append("Intentando conectar a " + direccion + ":" + puerto + "...\n");
+            clientSocket = new Socket(direccion, puerto);
+            
+            // Si la conexión es exitosa
+            out = new PrintWriter(clientSocket.getOutputStream(), true);
+            in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
+            conectado.set(true);
+            
+            // Actualizar GUI
+            campoDireccion.setEditable(false);
+            campoPuerto.setEditable(false);
+            botonConectar.setText("Desconectar");
+            botonEnviar.setEnabled(true);
+            areaChat.append("Conectado exitosamente al servidor.\n");
+            
+            // Iniciar hilo para escuchar mensajes del servidor
+            new Thread(this::escucharServidor).start();
+            
+        } catch (IOException e) {
+            areaChat.append("Error al conectar: " + e.getMessage() + "\n");
+            detenerConexion(); // Limpieza en caso de fallo de conexión
+        }
+    }
+    
+    /**
+     * Escucha mensajes del servidor en un hilo separado.
+     */
+    private void escucharServidor() {
+        try {
+            String inputLine;
+            while (conectado.get() && (inputLine = in.readLine()) != null) {
+                // Mostrar el mensaje en el área de chat
+                areaChat.append("Servidor: " + inputLine + "\n");
+                
+                // Mostrar los bytes en hexadecimal
+                byte[] bytes = inputLine.getBytes("UTF-8");
+                StringBuilder hexString = new StringBuilder();
+                for (byte b : bytes) {
+                    hexString.append(String.format("%02X ", b));
+                }
+                areaLog.append(hexString.toString() + "\n");
+            }
+        } catch (IOException e) {
+            // El error es esperado cuando el servidor se desconecta (readLine lanza excepción)
+            areaChat.append("Servidor se ha desconectado.\n");
+        } finally {
+            detenerConexion();
+        }
+    }
+
+    /**
+     * Cierra los sockets y streams, y restablece el estado de la GUI.
+     */
+    private void detenerConexion() {
+        conectado.set(false);
+        try {
+            if (out != null) out.close();
+            if (in != null) in.close();
+            if (clientSocket != null && !clientSocket.isClosed()) clientSocket.close();
+            
+            SwingUtilities.invokeLater(() -> {
+                areaChat.append("Conexión cerrada.\n");
+                botonConectar.setText("Conectar");
+                botonEnviar.setEnabled(false);
+                campoDireccion.setEditable(true);
+                campoPuerto.setEditable(true);
+            });
+            
+        } catch (IOException e) {
+            areaChat.append("Error al cerrar la conexión: " + e.getMessage() + "\n");
+        }
+    }
+
+    public static void main(String[] args) {
+        // Ejecutar en el hilo de despacho de eventos de Swing
+        SwingUtilities.invokeLater(() -> new ClienteChat());
+    }
+}
