@@ -1,0 +1,241 @@
+package com.mycompany.servidorc;
+
+import java.awt.BorderLayout;
+import java.awt.Container;
+import java.awt.FlowLayout;
+import java.awt.event.ActionListener;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.PrintWriter;
+import javax.swing.JButton;
+import javax.swing.JFrame;
+import javax.swing.JLabel;
+import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.JTextArea;
+import javax.swing.JTextField;
+import javax.swing.SwingUtilities;
+
+
+// Archivo: ServidorChat.java
+
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+public class Servidorc extends JFrame {
+    private JTextArea areaChat;
+    private JTextField campoMensaje;
+    private final JButton botonEnviar;
+    private final JButton botonConectar;
+    private final JTextArea areaLog; // Para mostrar bytes en Hex
+    
+    private ServerSocket serverSocket;
+    private Socket clientSocket;
+    private PrintWriter out;
+    private BufferedReader in;
+    private Thread hiloConexion;
+    private AtomicBoolean conectado = new AtomicBoolean(false);
+    
+    private static final int PUERTO_DEFAULT = 12345;
+
+    public Servidorc() {
+        super("Servidor de Chat");
+        
+        // --- Configuración de la Interfaz Gráfica ---
+        areaChat = new JTextArea(15, 30);
+        areaChat.setEditable(false);
+        JScrollPane scrollChat = new JScrollPane(areaChat);
+        
+        areaLog = new JTextArea(5, 30);
+        areaLog.setEditable(false);
+        JScrollPane scrollLog = new JScrollPane(areaLog);
+        
+        campoMensaje = new JTextField(20);
+        botonEnviar = new JButton("Enviar");
+        botonEnviar.setEnabled(false);
+        
+        botonConectar = new JButton("Iniciar Servidor");
+        
+        JPanel panelMensaje = new JPanel(new BorderLayout());
+        panelMensaje.add(campoMensaje, BorderLayout.CENTER);
+        panelMensaje.add(botonEnviar, BorderLayout.EAST);
+        
+        JPanel panelConexion = new JPanel(new FlowLayout());
+        panelConexion.add(new JLabel("Puerto: " + PUERTO_DEFAULT));
+        panelConexion.add(botonConectar);
+        
+        // Contenedor principal
+        Container content = getContentPane();
+        content.setLayout(new BorderLayout(5, 5));
+        
+        content.add(panelConexion, BorderLayout.NORTH);
+        content.add(scrollChat, BorderLayout.CENTER);
+        content.add(panelMensaje, BorderLayout.SOUTH);
+        content.add(new JLabel("Bytes Recibidos (Hex):"), BorderLayout.WEST);
+        content.add(scrollLog, BorderLayout.EAST);
+        
+        // --- Manejadores de Eventos ---
+        
+        // 1. Iniciar/Detener Servidor
+        botonConectar.addActionListener(e -> {
+            if (!conectado.get()) {
+                iniciarServidor();
+            } else {
+                detenerServidor();
+            }
+        });
+        
+        // 2. Enviar Mensaje
+        ActionListener enviarListener = e -> {
+            if (conectado.get() && !campoMensaje.getText().isEmpty()) {
+                String mensaje = campoMensaje.getText();
+                try {
+                    out.println(mensaje);
+                    areaChat.append("Yo: " + mensaje + "\n");
+                    campoMensaje.setText("");
+                } catch (Exception ex) {
+                    areaChat.append("Error al enviar: " + ex.getMessage() + "\n");
+                    detenerConexion();
+                }
+            }
+        };
+        
+        botonEnviar.addActionListener(enviarListener);
+        campoMensaje.addActionListener(enviarListener); // Permite enviar con Enter
+
+        // Configuración final de la ventana
+        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        pack();
+        setVisible(true);
+    }
+    
+    /**
+     * Inicia el ServerSocket en un hilo separado.
+     */
+    private void iniciarServidor() {
+        try {
+            serverSocket = new ServerSocket(PUERTO_DEFAULT);
+            areaChat.append("Servidor iniciado en el puerto " + PUERTO_DEFAULT + ". Esperando cliente...\n");
+            botonConectar.setText("Detener Servidor");
+            
+            // Hilo para aceptar la conexión del cliente (no bloquea la GUI)
+            hiloConexion = new Thread(() -> {
+                try {
+                    // Bloquea hasta que un cliente se conecta
+                    clientSocket = serverSocket.accept();
+                    conectado.set(true);
+                    areaChat.append("Cliente conectado desde: " + clientSocket.getInetAddress().getHostAddress() + "\n");
+                    
+                    // Configurar flujos
+                    out = new PrintWriter(clientSocket.getOutputStream(), true);
+                    in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
+                    
+                    SwingUtilities.invokeLater(() -> {
+                        botonEnviar.setEnabled(true);
+                        botonConectar.setText("Desconectar Cliente");
+                    });
+
+                    // Hilo de escucha
+                    escucharCliente();
+                    
+                } catch (IOException e) {
+                    if (conectado.get()) {
+                        areaChat.append("Error de conexión: " + e.getMessage() + "\n");
+                    } else {
+                        areaChat.append("Servidor detenido o error al iniciar: " + e.getMessage() + "\n");
+                    }
+                } finally {
+                    detenerConexion(); // Limpieza si la conexión falla o termina
+                }
+            });
+            
+            hiloConexion.start();
+            
+        } catch (IOException e) {
+            areaChat.append("Error al iniciar el servidor: " + e.getMessage() + "\n");
+            botonConectar.setText("Iniciar Servidor");
+        }
+    }
+    
+    /**
+     * Escucha mensajes del cliente y los muestra.
+     */
+    private void escucharCliente() {
+        try {
+            String inputLine;
+            while (conectado.get() && (inputLine = in.readLine()) != null) {
+                // Mostrar el mensaje en el área de chat
+                areaChat.append("Cliente: " + inputLine + "\n");
+                
+                // Mostrar los bytes en hexadecimal
+                byte[] bytes = inputLine.getBytes("UTF-8");
+                StringBuilder hexString = new StringBuilder();
+                for (byte b : bytes) {
+                    // Formatea cada byte a dos dígitos hexadecimales
+                    hexString.append(String.format("%02X ", b)); 
+                }
+                areaLog.append(hexString.toString() + "\n");
+            }
+        } catch (IOException e) {
+            // El error es esperado cuando el cliente se desconecta (readLine lanza excepción)
+            areaChat.append("Cliente se ha desconectado.\n");
+        } finally {
+            detenerConexion();
+        }
+    }
+
+    /**
+     * Cierra los sockets y streams, y restablece el estado de la GUI.
+     */
+    private void detenerConexion() {
+        conectado.set(false);
+        try {
+            if (out != null) out.close();
+            if (in != null) in.close();
+            if (clientSocket != null && !clientSocket.isClosed()) clientSocket.close();
+            // No cerramos serverSocket aquí si solo se desconectó el cliente
+            // para permitir que el Servidor inicie la escucha nuevamente.
+            
+            SwingUtilities.invokeLater(() -> {
+                areaChat.append("Conexión con el cliente cerrada.\n");
+                botonEnviar.setEnabled(false);
+                botonConectar.setText("Iniciar Servidor"); // Cambiar a Iniciar/Esperar Cliente
+            });
+            
+        } catch (IOException e) {
+            areaChat.append("Error al cerrar la conexión: " + e.getMessage() + "\n");
+        }
+    }
+    
+    /**
+     * Cierra el ServerSocket, deteniendo la capacidad de aceptar nuevas conexiones.
+     */
+    private void detenerServidor() {
+        areaChat.append("Deteniendo servidor...\n");
+        try {
+            // Cierra primero la conexión con el cliente si está activa
+            if (conectado.get()) {
+                detenerConexion();
+            }
+            
+            if (serverSocket != null && !serverSocket.isClosed()) {
+                serverSocket.close();
+            }
+            
+            SwingUtilities.invokeLater(() -> {
+                areaChat.append("Servidor detenido.\n");
+                botonConectar.setText("Iniciar Servidor");
+            });
+
+        } catch (IOException e) {
+            areaChat.append("Error al detener el servidor: " + e.getMessage() + "\n");
+        }
+    }
+
+    public static void main(String[] args) {
+        // Ejecutar en el hilo de despacho de eventos de Swing
+        SwingUtilities.invokeLater(() -> new Servidorc());
+    }
+}
